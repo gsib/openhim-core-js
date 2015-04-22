@@ -1,4 +1,3 @@
-Channel = require("../model/channels").Channel
 Transaction = require("../model/transactions").Transaction
 Q = require "q"
 xpath = require "xpath"
@@ -6,6 +5,15 @@ dom = require("xmldom").DOMParser
 logger = require "winston"
 config = require '../config/config'
 config.authentication = config.get('authentication')
+utils = require '../utils'
+
+statsdServer = config.get 'statsd'
+application = config.get 'application'
+SDC = require 'statsd-client'
+os = require 'os'
+
+domain = "#{os.hostname()}.#{application.name}.appMetrics"
+sdc = new SDC statsdServer
 
 matchContent = (channel, body) ->
   if channel.matchContentRegex
@@ -58,7 +66,7 @@ extractContentType = (ctHeader) ->
     return ctHeader.trim()
 
 # export private functions for unit testing
-# note: you can't spy on these method because of this :(
+# note: you cant spy on these method because of this :(
 if process.env.NODE_ENV == "test"
   exports.matchContent = matchContent
   exports.matchRegex = matchRegex
@@ -72,11 +80,11 @@ exports.isChannelEnabled = isChannelEnabled = (channel) -> not channel.status or
 
 
 exports.authorise = (ctx, done) ->
-  Channel.find {}, (err, channels) ->
+  utils.getAllChannels (err, channels) ->
     for channel in channels
       pat = new RegExp channel.urlPattern
       # if url pattern matches
-      if pat.test ctx.request.url
+      if pat.test ctx.request.path
         matchedRoles = {}
         allowedClient = false
         if ctx.authenticated?
@@ -103,27 +111,29 @@ exports.authorise = (ctx, done) ->
             if ctx.request.header and ctx.request.header['content-type']
               ct = extractContentType ctx.request.header['content-type']
               if (channel.matchContentTypes.indexOf ct) is -1
-                # deny access to channel if the content type doesn't match
+                # deny access to channel if the content type doesnt match
                 continue
             else
-              # deny access to channel if the content type isn't set
+              # deny access to channel if the content type isnt set
               continue
 
           # now check that the status is 'enabled' and if the message content matches
           if isChannelEnabled(channel) and matchContent(channel, ctx.body)
             ctx.authorisedChannel = channel
-            logger.info "The request, '" + ctx.request.url + "' is authorised to access " + ctx.authorisedChannel.name
+            logger.info "The request, '" + ctx.request.path + "' is authorised to access " + ctx.authorisedChannel.name
             return done()
 
     # authorisation failed
-    ctx.response.status = "unauthorized"
+    ctx.response.status = 401
     if config.authentication.enableBasicAuthentication
       ctx.set "WWW-Authenticate", "Basic"
-    logger.info "The request, '" + ctx.request.url + "', is not authorised to access any channels."
+    logger.info "The request, '" + ctx.request.path + "', is not authorised to access any channels."
     return done()
 
 exports.koaMiddleware = (next) ->
+  startTime = new Date() if statsdServer.enabled
   authorise = Q.denodeify exports.authorise
   yield authorise this
   if this.authorisedChannel?
+    sdc.timing "#{domain}.authorisationMiddleware", startTime if statsdServer.enabled
     yield next

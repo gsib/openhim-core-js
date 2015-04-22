@@ -1,7 +1,8 @@
 {
   "bindAddress": "0.0.0.0",
   "mongo": {
-    "url": "mongodb://localhost/openhim"
+    "url": "mongodb://localhost/openhim",
+    "atnaUrl": "mongodb://localhost/openhim"
   },
   "logger": {
     "level": "info"
@@ -12,11 +13,17 @@
     "timeout": 60000
   },
   "api": {
-    "httpsPort": 8080
+    "enabled" : true,
+    "httpsPort": 8080,
+    "authWindowSeconds": 10
   },
   "rerun": {
     "httpPort": 7786,
-    "host": "localhost"
+    "host": "localhost",
+    "processor": {
+      "enabled": true,
+      "pollPeriodMillis": 2000
+    }
   },
   "tcpAdapter": {
     "httpReceiver": {
@@ -25,6 +32,7 @@
     }
   },
   "polling": {
+    "enabled": true,
     "pollingPort": 7788,
     "host": "localhost"
   },
@@ -72,5 +80,31 @@
   "newUserExpiry": {
     "duration": 7,
     "durationType": "days"
+  },
+  "auditing": {
+    "servers": {
+      "udp": {
+        "enabled": false,
+        "port": 5050
+      },
+      "tls": {
+        "enabled": false,
+        "port": 5051
+      },
+      "tcp": {
+        "enabled": false,
+        "port": 5052
+      }
+    }
+  },
+  "caching": {
+    "enabled": true,
+    "refreshMillis": 1000
+  },
+  "tlsClientLookup": {
+    "type": "strict"
+  },
+  "agenda": {
+    "startupDelay": 500
   }
 }

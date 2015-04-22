@@ -2,6 +2,7 @@ ContactGroup = require('../model/contactGroups').ContactGroup
 Q = require 'q'
 logger = require 'winston'
 authorisation = require './authorisation'
+Channel = require('../model/channels').Channel
 
 utils = require "../utils"
 
@@ -11,7 +12,7 @@ utils = require "../utils"
 exports.addContactGroup = ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to addContactGroup denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to addContactGroup denied.", 'info'
     return
 
   contactGroupData = this.request.body
@@ -19,10 +20,10 @@ exports.addContactGroup = ->
   try
     contactGroup = new ContactGroup contactGroupData
     result = yield Q.ninvoke(contactGroup, 'save')
-    
-    utils.logAndSetResponse this, 'created', "Contact Group successfully created", 'info'
+
+    utils.logAndSetResponse this, 201, "Contact Group successfully created", 'info'
   catch err
-    utils.logAndSetResponse this, 'bad request', "Could not add a contact group via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 400, "Could not add a contact group via the API: #{err}", 'error'
 
 
 
@@ -32,7 +33,7 @@ exports.addContactGroup = ->
 exports.getContactGroup = (contactGroupId) ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to getContactGroup denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to getContactGroup denied.", 'info'
     return
 
   contactGroupId = unescape contactGroupId
@@ -42,11 +43,11 @@ exports.getContactGroup = (contactGroupId) ->
 
     if result == null
       this.body = "Contact Group with id '#{contactGroupId}' could not be found."
-      this.status = 'not found'
+      this.status = 404
     else
       this.body = result
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not find Contact Group by id '#{contactGroupId}' via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not find Contact Group by id '#{contactGroupId}' via the API: #{err}", 'error'
 
 
 
@@ -56,7 +57,7 @@ exports.getContactGroup = (contactGroupId) ->
 exports.updateContactGroup = (contactGroupId) ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to updateContactGroup denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to updateContactGroup denied.", 'info'
     return
 
   contactGroupId = unescape contactGroupId
@@ -71,7 +72,7 @@ exports.updateContactGroup = (contactGroupId) ->
     this.body = "Successfully updated contact group."
     logger.info "User #{this.authenticated.email} updated contact group with id #{contactGroupId}"
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not update Contact Group by id #{contactGroupId} via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not update Contact Group by id #{contactGroupId} via the API: #{err}", 'error'
 
 
 
@@ -82,17 +83,31 @@ exports.updateContactGroup = (contactGroupId) ->
 exports.removeContactGroup = (contactGroupId) ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to removeContactGroup denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to removeContactGroup denied.", 'info'
     return
 
   contactGroupId = unescape contactGroupId
 
   try
-    yield ContactGroup.findByIdAndRemove(contactGroupId).exec()
-    this.body = "Successfully removed contact group with ID '#{contactGroupId}'"
-    logger.info "User #{this.authenticated.email} removed contact group with id #{contactGroupId}"
+    # find out if there are any alerts associated with this group
+    linkedAlerts = yield Channel.find({
+      alerts :{
+        $elemMatch :{
+          groups: {
+            $in: [contactGroupId]
+          }
+        }
+      }
+    }).exec()
+    if linkedAlerts.length > 0
+      this.status = 409
+      this.body = linkedAlerts
+    else
+      yield ContactGroup.findByIdAndRemove(contactGroupId).exec()
+      this.body = "Successfully removed contact group with ID '#{contactGroupId}'"
+      logger.info "User #{this.authenticated.email} removed contact group with id #{contactGroupId}"
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not remove Contact Group by id {contactGroupId} via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not remove Contact Group by id {contactGroupId} via the API: #{err}", 'error'
 
 
 
@@ -103,10 +118,10 @@ exports.removeContactGroup = (contactGroupId) ->
 exports.getContactGroups = ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to getContactGroups denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to getContactGroups denied.", 'info'
     return
 
   try
     this.body = yield ContactGroup.find().exec()
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not fetch all Contact Group via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not fetch all Contact Group via the API: #{err}", 'error'

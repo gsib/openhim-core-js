@@ -6,6 +6,11 @@ User = require('../../lib/model/users').User
 server = require "../../lib/server"
 testUtils = require "../testUtils"
 auth = require("../testUtils").auth
+FakeServer = require "../fakeTcpServer"
+config = require '../../lib/config/config'
+application = config.get 'application'
+os = require "os"
+domain = os.hostname() + '.' + application.name
 
 describe "API Integration Tests", ->
 
@@ -56,8 +61,8 @@ describe "API Integration Tests", ->
           response: respo
         ]
       properties: 
-        property: "prop1", value: "prop1-value1"
-        property:"prop2", value: "prop-value1"
+        "prop1": "prop1-value1"
+        "prop2": "prop-value1"
 
     authDetails = {}
 
@@ -91,7 +96,7 @@ describe "API Integration Tests", ->
       auth.setupTestUsers (err) ->
         channel.save (err) ->
           channel2.save (err) ->
-            server.start null, null, 8080, null, null, null,  ->
+            server.start apiPort: 8080, ->
               done()
 
     after (done) ->
@@ -147,6 +152,14 @@ describe "API Integration Tests", ->
               done()
 
     describe "*updateTransaction()", ->
+
+      s = {}
+      beforeEach (done) ->
+        s = new FakeServer()
+        s.start done
+
+      afterEach ->
+        s.stop()
       
       it "should call /updateTransaction ", (done) ->
         tx = new Transaction transactionData
@@ -165,6 +178,28 @@ describe "API Integration Tests", ->
             request: reqUp
             status: "Completed"
             clientID: "777777777777777777777777"
+            $push: {
+              routes : {
+                "name": "async",
+                "orchestrations": [
+                  {
+                    "name": "test",
+                    "request": {
+                      "method": "POST",
+                      "body": "data",
+                      "timestamp": 1425897647329
+                    },
+                    "response": {
+                      "status": 201,
+                      "body": "OK",
+                      "timestamp": 1425897688016
+                    }
+                  }
+                ]
+              }
+            }
+
+
           request("https://localhost:8080")
             .put("/transactions/#{transactionId}")
             .set("auth-username", testUtils.rootUser.email)
@@ -188,6 +223,11 @@ describe "API Integration Tests", ->
                   updatedTrans.request.querystring.should.equal "updated=value"
                   updatedTrans.request.body.should.equal "<HTTP body update>"
                   updatedTrans.request.method.should.equal "PUT"
+                  updatedTrans.routes[1].name.should.equal "async"
+                  updatedTrans.routes[1].orchestrations[0].name.should.equal "test"
+                  s.expectMessage domain + '.channels.888888888888888888888888.async.orchestrations.test:1|c', ->
+                    s.expectMessage domain + '.channels.888888888888888888888888.async.orchestrations.test.statusCodes.201:1|c', done
+
                   done()
 
       it "should only allow admin user to update a transaction", (done) ->
@@ -214,11 +254,12 @@ describe "API Integration Tests", ->
 
       it "should call getTransactions ", (done) ->
         Transaction.count {}, (err, countBefore) ->
+
           tx = new Transaction transactionData
           tx.save (error, result) ->
             should.not.exist (error)
             request("https://localhost:8080")
-              .get("/transactions?filterPage=0&filterLimit=10")
+              .get("/transactions?filterPage=0&filterLimit=10&filters={}")
               .set("auth-username", testUtils.rootUser.email)
               .set("auth-ts", authDetails.authTS)
               .set("auth-salt", authDetails.authSalt)
@@ -232,14 +273,31 @@ describe "API Integration Tests", ->
                   done()
 
       it "should call getTransactions with filter paramaters ", (done) ->
-        startDate = "2014-06-09T00:00:00.000Z"
-        endDate = "2014-06-10T00:00:00.000Z"
+
+        obj =
+          filterPage: 0
+          filterLimit: 10
+          filters: 
+            'status': 'Processing'
+            'request.timestamp': '{"$gte": "2014-06-09T00:00:00.000Z", "$lte": "2014-06-10T00:00:00.000Z" }'
+            'request.path': '/api/test'
+            'response.status': '2xx'
+
+        params = ""
+        for k, v of obj
+          v = JSON.stringify v
+          if params.length > 0
+              params += "&"
+          params += "#{k}=#{v}"
+
+        params = encodeURI params
+
         Transaction.count {}, (err, countBefore) ->
           tx = new Transaction transactionData
           tx.save (error, result) ->
             should.not.exist (error)
             request("https://localhost:8080")
-              .get("/transactions?status=Processing&filterPage=0&filterLimit=10&startDate="+startDate+"&endDate="+endDate)
+              .get("/transactions?"+params)
               .set("auth-username", testUtils.rootUser.email)
               .set("auth-ts", authDetails.authTS)
               .set("auth-salt", authDetails.authSalt)
@@ -252,15 +310,116 @@ describe "API Integration Tests", ->
                   res.body.length.should.equal countBefore + 1
                   done()
 
+      it "should call getTransactions with filter paramaters (Different filters)", (done) ->
+
+        obj =
+          filterPage: 0
+          filterLimit: 10
+          filters: 
+            'status': 'Processing'
+            'routes.request.path': '/api/test'
+            'routes.response.status': '2xx'
+            'orchestrations.request.path': '/api/test'
+            'orchestrations.response.status': '2xx'
+            'properties': 
+              'prop1': 'prop1-value1'
+
+        params = ""
+        for k, v of obj
+          v = JSON.stringify v
+          if params.length > 0
+              params += "&"
+          params += "#{k}=#{v}"
+
+        params = encodeURI params
+
+        Transaction.count {}, (err, countBefore) ->
+          tx = new Transaction transactionData
+          tx.save (error, result) ->
+            should.not.exist (error)
+            request("https://localhost:8080")
+              .get("/transactions?"+params)
+              .set("auth-username", testUtils.rootUser.email)
+              .set("auth-ts", authDetails.authTS)
+              .set("auth-salt", authDetails.authSalt)
+              .set("auth-token", authDetails.authToken)
+              .expect(200)
+              .end (err, res) ->
+                if err
+                  done err
+                else
+                  res.body.length.should.equal countBefore + 1
+                  done()
+
+      it "should call getTransactions with filter paramaters (Different filters - return no results)", (done) ->
+
+        obj =
+          filterPage: 0
+          filterLimit: 10
+          filters: 
+            'status': 'Processing'
+            'routes.request.path': '/api/test'
+            'routes.response.status': '2xx'
+            'orchestrations.request.path': '/api/test'
+            'orchestrations.response.status': '2xx'
+            'properties': 
+              'prop3': 'prop3-value3'
+
+        params = ""
+        for k, v of obj
+          v = JSON.stringify v
+          if params.length > 0
+              params += "&"
+          params += "#{k}=#{v}"
+
+        params = encodeURI params
+
+        Transaction.count {}, (err, countBefore) ->
+          tx = new Transaction transactionData
+          tx.save (error, result) ->
+            should.not.exist (error)
+            request("https://localhost:8080")
+              .get("/transactions?"+params)
+              .set("auth-username", testUtils.rootUser.email)
+              .set("auth-ts", authDetails.authTS)
+              .set("auth-salt", authDetails.authSalt)
+              .set("auth-token", authDetails.authToken)
+              .expect(200)
+              .end (err, res) ->
+                if err
+                  done err
+                else
+                  # prop3 does not exist so no records should be returned
+                  res.body.length.should.equal 0
+                  done()
+
       it "should only return the transactions that a user can view", (done) ->
         tx = new Transaction transactionData
         tx.channelID = channel._id
         tx.save (err) ->
           if err
             return done err
+
+        obj =
+          filterPage: 0
+          filterLimit: 10
+          filters: 'status': 'Processing'
+          'request.timestamp':
+            '$gte': '2014-06-09T00:00:00.000Z'
+            '$lte': '2014-06-10T00:00:00.000Z'
+          'request.path': '/api/test'
+
+        params = ""
+        for k, v of obj
+          v = JSON.stringify v
+          if params.length > 0
+              params += "&"
+          params += "#{k}=#{v}"
+
+        params = encodeURI params
           
         request("https://localhost:8080")
-          .get("/transactions")
+          .get("/transactions?"+params)
           .set("auth-username", testUtils.nonRootUser.email)
           .set("auth-ts", authDetails.authTS)
           .set("auth-salt", authDetails.authSalt)

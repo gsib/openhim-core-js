@@ -10,7 +10,7 @@ auth = require("../testUtils").auth
 
 describe "API Integration Tests", ->
 
-  describe "Transactions REST Api testing", ->
+  describe "Restart REST Api testing", ->
     transactionId = null
     requ =
       path: "/api/test"
@@ -72,7 +72,7 @@ describe "API Integration Tests", ->
     before (done) ->
       auth.setupTestUsers (err) ->
         channel.save (err) ->
-          server.start null, null, 8080, null, null, null,  ->
+          server.start apiPort: 8080, ->
             done()
 
     after (done) ->
@@ -87,7 +87,7 @@ describe "API Integration Tests", ->
     describe "*restart()", ->
 
       it "should successfully send API request to restart the server", (done) ->
-        spy = sinon.spy server, 'startRestartServerAgenda'
+        stub = sinon.stub server, 'startRestartServerTimeout'
         request("https://localhost:8080")
           .post("/restart")
           .set("auth-username", testUtils.rootUser.email)
@@ -100,20 +100,21 @@ describe "API Integration Tests", ->
             if err
               done err
             else
-              spy.calledOnce.should.be.true
+              stub.calledOnce.should.be.true
               done()
 
       it "should not allow non admin user to restart the server", (done) ->
         request("https://localhost:8080")
-            .post("/restart")
-            .set("auth-username", testUtils.nonRootUser.email)
-            .set("auth-ts", authDetails.authTS)
-            .set("auth-salt", authDetails.authSalt)
-            .set("auth-token", authDetails.authToken)
-            .send()
-            .expect(403)
-            .end (err, res) ->
-              if err
-                done err
-              else
-                done()
+          .post("/restart")
+          .set("auth-username", testUtils.nonRootUser.email)
+          .set("auth-ts", authDetails.authTS)
+          .set("auth-salt", authDetails.authSalt)
+          .set("auth-token", authDetails.authToken)
+          .send()
+          .expect(403)
+          .end (err, res) ->
+            if err
+              done err
+            else
+              done()
+

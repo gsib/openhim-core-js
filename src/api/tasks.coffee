@@ -4,13 +4,6 @@ Channel = require('../model/channels').Channel
 Q = require 'q'
 logger = require 'winston'
 
-ObjectId = require('mongoose').Types.ObjectId
-monq = require("monq")
-
-config = require("../config/config")
-client = monq(config.mongo.url, safe: true)
-
-queue = client.queue("transactions")
 authorisation = require './authorisation'
 authMiddleware = require '../middleware/authorisation'
 
@@ -51,13 +44,42 @@ isRerunPermissionsValid = (user, transactions, callback) ->
 exports.getTasks = ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to getTasks denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to getTasks denied.", 'info'
     return
 
   try
+
+    filtersObject = this.request.query
+
+    #get limit and page values
+    filterLimit = filtersObject.filterLimit
+    filterPage = filtersObject.filterPage
+
+    #determine skip amount
+    filterSkip = filterPage*filterLimit
+
+    # get filters object
+    filters = JSON.parse filtersObject.filters
+
+    # parse date to get it into the correct format for querying
+    if filters['created']
+      filters['created'] = JSON.parse filters['created']
+
+    # exclude transactions object from tasks list
+    projectionFiltersObject = { 'transactions': 0 }
+
     this.body = yield Task.find({}).exec()
+
+    # execute the query
+    this.body = yield Task
+      .find filters, projectionFiltersObject
+      .skip filterSkip
+      .limit filterLimit
+      .sort 'created': -1
+      .exec()
+
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not fetch all tasks via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not fetch all tasks via the API: #{err}", 'error'
 
 
 areTransactionChannelsValid = (transactions, callback) ->
@@ -76,7 +98,6 @@ areTransactionChannelsValid = (transactions, callback) ->
 
 #####################################################
 # Creates a new Task
-# Create the new queue objects for the created task #
 #####################################################
 exports.addTask = ->
 
@@ -88,6 +109,14 @@ exports.addTask = ->
     taskObject.remainingTransactions = transactions.tids.length
     taskObject.user = this.authenticated.email
 
+    if transactions.batchSize?
+      if transactions.batchSize <= 0
+        return utils.logAndSetResponse this, 400, 'Invalid batch size specified', 'info'
+      taskObject.batchSize = transactions.batchSize
+
+    if transactions.paused
+      taskObject.status = 'Paused'
+
     # check rerun permission and whether to create the rerun task
     isRerunPermsValid = Q.denodeify(isRerunPermissionsValid)
     allowRerunTaskCreation = yield isRerunPermsValid( this.authenticated, transactions )
@@ -98,47 +127,24 @@ exports.addTask = ->
       trxChannelsValid = yield areTrxChannelsValid(transactions)
 
       if !trxChannelsValid
-        utils.logAndSetResponse this, 'bad request', 'Cannot queue task as there are transactions with disabled or deleted channels', 'info'
+        utils.logAndSetResponse this, 400, 'Cannot queue task as there are transactions with disabled or deleted channels', 'info'
         return
 
-      t = 0
-      while t < transactions.tids.length
-        transaction = tid: transactions.tids[t]
-        transactionsArr.push transaction
-        t++
+      transactionsArr.push tid: tid for tid in transactions.tids
       taskObject.transactions = transactionsArr
+      taskObject.totalTransactions = transactionsArr.length
 
       task = new Task(taskObject)
       result = yield Q.ninvoke(task, 'save')
 
-      taskID = result[0]._id
-      transactions = taskObject.transactions
-      i = 0
-      while i < transactions.length
-        try
-          transactionID = transactions[i].tid
-          queue.enqueue 'rerun_transaction', {
-            transactionID: transactionID
-            taskID: taskID
-          }, (e, job) ->
-            logger.info 'Enqueued transaction: #{job.data.params.transactionID}'
-            return
-
-          # All ok! So set the result
-          utils.logAndSetResponse this, 'created', 'Queue item successfully created', 'info'
-        catch err
-          # Error! So inform the user
-          utils.logAndSetResponse this, 'internal server error', "Could not add Queue item via the API: #{err}", 'info'
-        i++
-
       # All ok! So set the result
-      utils.logAndSetResponse this, 'created', "User #{this.authenticated.email} created task with id #{task.id}", 'info'
+      utils.logAndSetResponse this, 201, "User #{this.authenticated.email} created task with id #{task.id}", 'info'
     else
       # rerun task creation not allowed
-      utils.logAndSetResponse this, 'forbidden', "Insufficient permissions prevents this rerun task from being created", 'error'
+      utils.logAndSetResponse this, 403, "Insufficient permissions prevents this rerun task from being created", 'error'
   catch err
     # Error! So inform the user
-    utils.logAndSetResponse this, 'internal server error', "Could not add Task via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not add Task via the API: #{err}", 'error'
 
 
 
@@ -146,24 +152,99 @@ exports.addTask = ->
 #############################################
 # Retrieves the details for a specific Task #
 #############################################
+
+
+# function to build filtered transactions
+buildFilteredTransactionsArray = (filters, transactions) ->
+
+  # set tempTransactions array to return
+  tempTransactions = []
+
+  i = 0
+  while i < transactions.length
+    # set filter variable to captured failed filters
+    filtersFailed = false
+
+    if filters.tstatus
+      # if tstatus doesnt equal filter then set filter failed to true
+      if filters.tstatus != transactions[i].tstatus
+        filtersFailed = true
+
+    if filters.rerunStatus
+      # if rerunStatus doesnt equal filter then set filter failed to true
+      if filters.rerunStatus != transactions[i].rerunStatus
+        filtersFailed = true
+
+    if filters.hasErrors
+      # if hasErrors filter 'yes' but no hasErrors exist then set filter failed to true
+      if filters.hasErrors == 'yes' && !transactions[i].hasErrors
+        filtersFailed = true
+      # if hasErrors filter 'no' but hasErrors does exist then set filter failed to true
+      else if filters.hasErrors == 'no' && transactions[i].hasErrors
+        filtersFailed = true
+
+    # add transaction if all filters passed successfully
+    if filtersFailed is false
+      tempTransactions.push( transactions[i] )
+
+    # increment counter
+    i++
+
+  return tempTransactions
+
+
+
+
 exports.getTask = (taskId) ->
 
   # Get the values to use
   taskId = unescape taskId
 
   try
-    # Try to get the Task (Call the function that emits a promise and Koa will wait for the function to complete)
-    result = yield Task.findById(taskId).exec()
+
+    filtersObject = this.request.query
+
+    #get limit and page values
+    filterLimit = filtersObject.filterLimit
+    filterPage = filtersObject.filterPage
+
+    #determine skip amount
+    filterSkip = filterPage*filterLimit
+    
+    # get filters object
+    filters = JSON.parse filtersObject.filters
+
+    result = yield Task.findById(taskId).lean().exec()
+    tempTransactions = result.transactions
+
+
+    # are filters present
+    if Object.keys( filters ).length > 0
+      tempTransactions = buildFilteredTransactionsArray filters, result.transactions
+      
+
+    # get new transactions filters length
+    totalFilteredTransactions = tempTransactions.length
+
+    # assign new transactions filters length to result property
+    result.totalFilteredTransactions = totalFilteredTransactions
+
+    # work out where to slice from and till where
+    sliceFrom = filterSkip
+    sliceTo = filterSkip + parseInt filterLimit
+
+    # slice the transactions array to return only the correct amount of records at the correct index
+    result.transactions = tempTransactions.slice sliceFrom, sliceTo
 
     # Test if the result if valid
     if result == null
-      # Channel not foud! So inform the user
-      utils.logAndSetResponse this, 'not found', "We could not find a Task with this ID: #{taskId}.", 'info'
+      # task not found! So inform the user
+      utils.logAndSetResponse this, 404, "We could not find a Task with this ID: #{taskId}.", 'info'
     else
       this.body = result
       # All ok! So set the result
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not fetch Task by ID {taskId} via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not fetch Task by ID {taskId} via the API: #{err}", 'error'
 
 
 
@@ -174,12 +255,15 @@ exports.getTask = (taskId) ->
 exports.updateTask = (taskId) ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to updateTask denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to updateTask denied.", 'info'
     return
 
   # Get the values to use
   taskId = unescape taskId
   taskData = this.request.body
+
+  # Ignore _id if it exists, user cannot change the internal id
+  delete taskData._id if taskData._id?
 
   try
     yield Task.findOneAndUpdate({ _id: taskId }, taskData).exec()
@@ -188,7 +272,7 @@ exports.updateTask = (taskId) ->
     this.body = 'The Task was successfully updated'
     logger.info "User #{this.authenticated.email} updated task with id #{taskId}"
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not update Task by ID {taskId} via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not update Task by ID {taskId} via the API: #{err}", 'error'
 
 
 
@@ -198,7 +282,7 @@ exports.updateTask = (taskId) ->
 exports.removeTask = (taskId) ->
   # Must be admin
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to removeTask denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to removeTask denied.", 'info'
     return
 
   # Get the values to use
@@ -212,4 +296,4 @@ exports.removeTask = (taskId) ->
     this.body = 'The Task was successfully deleted'
     logger.info "User #{this.authenticated.email} removed task with id #{taskId}"
   catch err
-    utils.logAndSetResponse this, 'internal server error', "Could not remove Task by ID {taskId} via the API: #{err}", 'error'
+    utils.logAndSetResponse this, 500, "Could not remove Task by ID {taskId} via the API: #{err}", 'error'

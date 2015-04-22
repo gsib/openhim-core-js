@@ -12,14 +12,15 @@ tasks = require './api/tasks'
 contactGroups = require './api/contactGroups'
 visualizer = require './api/visualizer'
 Q = require 'q'
-worker = require './api/worker'
 mediators = require './api/mediators'
 metrics = require './api/metrics'
 keystore = require './api/keystore'
 serverRestart = require './api/restart'
+audits = require './api/audits'
 statsd = require './api/statsd'
 config = require './config/config'
-#statsd_instance = config.get 'statsd'
+heartbeat = require './api/heartbeat'
+certificateAuthority = require './api/certificateAuthority'
 
 exports.setupApp = (done) ->
 
@@ -27,6 +28,9 @@ exports.setupApp = (done) ->
   app = koa()
   app.use cors()
   app.use bodyParser()
+
+  # Expose uptime server stats route before the auth middleware so that it is publically accessible
+  app.use route.get '/heartbeat', heartbeat.getHeartbeat
 
   # Expose the set-user-password route before the auth middleware so that it is publically accessible
   app.use route.get '/new-user/:token', users.getNewUser
@@ -99,9 +103,19 @@ exports.setupApp = (done) ->
   app.use route.post '/keystore/key', keystore.setServerKey
   app.use route.post '/keystore/ca/cert', keystore.addTrustedCert
   app.use route.get '/keystore/validity', keystore.verifyServerKeys
+  app.use route.post '/keystore/passphrase', keystore.setServerPassphrase
 
   # server restart endpoint
   app.use route.post '/restart', serverRestart.restart
+
+  # AuditRecord endpoint
+  app.use route.post '/audits', audits.addAudit
+  app.use route.get '/audits', audits.getAudits
+  app.use route.get '/audits/:auditId', audits.getAuditById
+  app.use route.get '/audits-filter-options', audits.getAuditsFilterOptions
+
+  # Ceritficates endpoint
+  app.use route.post '/certificates', certificateAuthority.generateCert
 
   # Return the result
   done(app)

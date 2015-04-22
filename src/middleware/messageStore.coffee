@@ -2,6 +2,15 @@ transactions = require "../model/transactions"
 logger = require "winston"
 Q = require "q"
 
+config = require '../config/config'
+statsdServer = config.get 'statsd'
+application = config.get 'application'
+SDC = require 'statsd-client'
+os = require 'os'
+
+domain = "#{os.hostname()}.#{application.name}.appMetrics"
+sdc = new SDC statsdServer
+
 exports.transactionStatus = transactionStatus =
   PROCESSING: 'Processing'
   SUCCESSFUL: 'Successful'
@@ -105,7 +114,8 @@ exports.storeResponse = (ctx, done) ->
   # assign new transactions status to ctx object
   ctx.transactionStatus = status
 
-  update = { response: res, status: status, routes: ctx.routes }
+  update = { response: res, status: status }
+  update.routes = ctx.routes if ctx.routes?
 
   if ctx.mediatorResponse
     update.orchestrations = ctx.mediatorResponse.orchestrations if ctx.mediatorResponse.orchestrations
@@ -121,7 +131,11 @@ exports.storeResponse = (ctx, done) ->
     return done()
 
 exports.koaMiddleware = (next) ->
+  startTime = new Date() if statsdServer.enabled
   saveTransaction = Q.denodeify exports.storeTransaction
   yield saveTransaction this
+  sdc.timing "#{domain}.messageStoreMiddleware.storeTransaction", startTime if statsdServer.enabled
   yield next
+  startTime = new Date() if statsdServer.enabled
   exports.storeResponse this, ->
+  sdc.timing "#{domain}.messageStoreMiddleware.storeResponse", startTime if statsdServer.enabled

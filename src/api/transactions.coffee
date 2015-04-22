@@ -1,9 +1,18 @@
 transactions = require '../model/transactions'
 Channel = require('../model/channels').Channel
+Client = require('../model/clients').Client
 Q = require 'q'
 logger = require 'winston'
 authorisation = require './authorisation'
 utils = require "../utils"
+config = require '../config/config'
+statsd_client = require "statsd-client"
+statsd_server = config.get 'statsd'
+sdc = new statsd_client statsd_server
+application = config.get 'application'
+os = require "os"
+timer = new Date()
+domain = os.hostname() + '.' + application.name
 
 getChannelIDsArray = (channels) ->
   channelIDs = []
@@ -21,29 +30,25 @@ getProjectionObject = (filterRepresentation) ->
     when "full"
       # view all transaction data
       return {}
+    when "bulkrerun"
+      # view only 'bulkrerun' properties
+      return { "_id": 1, "childIDs": 1, "canRerun": 1, "channelID": 1 }
     else
       # no filterRepresentation supplied - simple view
       # view minimum required data for transactions
       return { "request.body": 0, "request.headers": 0, "response.body": 0, "response.headers": 0, orchestrations: 0, routes: 0 }
-  
+
 
 
 
 ###
 # Retrieves the list of transactions
 ###
+
 exports.getTransactions = ->
   try
 
     filtersObject = this.request.query
-
-    #construct date range filter option
-    if filtersObject.startDate and filtersObject.endDate
-      filtersObject['request.timestamp'] = $gte: filtersObject.startDate, $lt: filtersObject.endDate
-
-      #remove startDate/endDate from objects filter (Not part of filtering and will break filter)
-      delete filtersObject.startDate
-      delete filtersObject.endDate
 
     #get limit and page values
     filterLimit = filtersObject.filterLimit
@@ -71,17 +76,90 @@ exports.getTransactions = ->
 
     # get projection object
     projectionFiltersObject = getProjectionObject filterRepresentation
+    
+    # get filters object
+    filters = JSON.parse filtersObject.filters
+
+    # parse date to get it into the correct format for querying
+    if filters['request.timestamp']
+      filters['request.timestamp'] = JSON.parse filters['request.timestamp']
+ 
+
+
+
+    ### Transaction Filters ###
+    # build RegExp for transaction request path filter
+    if filters['request.path']
+      filters['request.path'] = new RegExp filters['request.path'], "i"
+
+    # build RegExp for transaction request querystring filter
+    if filters['request.querystring']
+      filters['request.querystring'] = new RegExp filters['request.querystring'], "i"
+
+    # response status pattern match checking
+    if filters['response.status'] && utils.statusCodePatternMatch( filters['response.status'] )
+      filters['response.status'] = "$gte": filters['response.status'][0]*100, "$lt": filters['response.status'][0]*100+100
+
+    # check if properties exist
+    if filters['properties']
+      # we need to source the property key and re-construct filter
+      key = Object.keys(filters['properties'])[0]
+      filters['properties.'+key] = filters['properties'][key]
+
+      # if property has no value then check if property exists instead
+      if filters['properties'][key] is null
+        filters['properties.'+key] = { '$exists': true }
+
+      # delete the old properties filter as its not needed
+      delete filters['properties']
+
+    # parse childIDs.0 query to get it into the correct format for querying
+    # .0 is first index of array - used to validate if empty or not
+    if filters['childIDs.0']
+      filters['childIDs.0'] = JSON.parse filters['childIDs.0']
+
+
+
+    ### Route Filters ###
+    # build RegExp for route request path filter
+    if filters['routes.request.path']
+      filters['routes.request.path'] = new RegExp filters['routes.request.path'], "i"
+
+    # build RegExp for transaction request querystring filter
+    if filters['routes.request.querystring']
+      filters['routes.request.querystring'] = new RegExp filters['routes.request.querystring'], "i"
+
+    # route response status pattern match checking
+    if filters['routes.response.status'] && utils.statusCodePatternMatch( filters['routes.response.status'] )
+      filters['routes.response.status'] = "$gte": filters['routes.response.status'][0]*100, "$lt": filters['routes.response.status'][0]*100+100
+
+
+
+    ### orchestration Filters ###
+    # build RegExp for orchestration request path filter
+    if filters['orchestrations.request.path']
+      filters['orchestrations.request.path'] = new RegExp filters['orchestrations.request.path'], "i"
+
+    # build RegExp for transaction request querystring filter
+    if filters['orchestrations.request.querystring']
+      filters['orchestrations.request.querystring'] = new RegExp filters['orchestrations.request.querystring'], "i"
+
+    # orchestration response status pattern match checking
+    if filters['orchestrations.response.status'] && utils.statusCodePatternMatch( filters['orchestrations.response.status'] )
+      filters['orchestrations.response.status'] = "$gte": filters['orchestrations.response.status'][0]*100, "$lt": filters['orchestrations.response.status'][0]*100+100
+
+    
 
     # execute the query
     this.body = yield transactions.Transaction
-      .find filtersObject, projectionFiltersObject
+      .find filters, projectionFiltersObject
       .skip filterSkip
       .limit filterLimit
       .sort 'request.timestamp': -1
       .exec()
 
   catch e
-    utils.logAndSetResponse this, 'internal server error', "Could not retrieve transactions via the API: #{e}", 'error'
+    utils.logAndSetResponse this, 500, "Could not retrieve transactions via the API: #{e}", 'error'
 
 ###
 # Adds an transaction
@@ -90,7 +168,7 @@ exports.addTransaction = ->
 
   # Test if the user is authorised
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to addTransaction denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to addTransaction denied.", 'info'
     return
 
   # Get the values to use
@@ -100,10 +178,10 @@ exports.addTransaction = ->
   try
     # Try to add the new transaction (Call the function that emits a promise and Koa will wait for the function to complete)
     yield Q.ninvoke tx, "save"
-    this.status = 'created'
+    this.status = 201
     logger.info "User #{this.authenticated.email} created transaction with id #{tx.id}"
   catch e
-    utils.logAndSetResponse this, 'internal server error', "Could not add a transaction via the API: #{e}", 'error'
+    utils.logAndSetResponse this, 500, "Could not add a transaction via the API: #{e}", 'error'
 
 
 ###
@@ -130,7 +208,7 @@ exports.getTransactionById = (transactionId) ->
       txChannelID = yield transactions.Transaction.findById(transactionId, channelID: 1, _id: 0).exec()
       if txChannelID?.length is 0
         this.body = "Could not find transaction with ID: #{transactionId}"
-        this.status = 'not found'
+        this.status = 404
         return
       else
         # assume user is not allowed to view all content - show only 'simpledetails'
@@ -154,21 +232,21 @@ exports.getTransactionById = (transactionId) ->
     result = yield transactions.Transaction.findById(transactionId, projectionFiltersObject).exec()
 
     # Test if the result if valid
-    if result?.length is 0
+    if not result
       this.body = "Could not find transaction with ID: #{transactionId}"
-      this.status = 'not found'
+      this.status = 404
     # Test if the user is authorised
     else if not authorisation.inGroup 'admin', this.authenticated
       channels = yield authorisation.getUserViewableChannels this.authenticated
       if getChannelIDsArray(channels).indexOf(result.channelID.toString()) >= 0
         this.body = result
       else
-        utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not authenticated to retrieve transaction #{transactionId}", 'info'
+        utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not authenticated to retrieve transaction #{transactionId}", 'info'
     else
       this.body = result
 
   catch e
-    utils.logAndSetResponse this, 'internal server error', "Could not get transaction by ID via the API: #{e}", 'error'
+    utils.logAndSetResponse this, 500, "Could not get transaction by ID via the API: #{e}", 'error'
 
 
 ###
@@ -203,9 +281,9 @@ exports.findTransactionByClientId = (clientId) ->
       .find filtersObject, projectionFiltersObject
       .sort 'request.timestamp': -1
       .exec()
-    
+
   catch e
-    utils.logAndSetResponse this, 'internal server error', "Could not get transaction by clientID via the API: #{e}", 'error'
+    utils.logAndSetResponse this, 500, "Could not get transaction by clientID via the API: #{e}", 'error'
 
 
 ###
@@ -215,19 +293,78 @@ exports.updateTransaction = (transactionId) ->
 
   # Test if the user is authorised
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to updateTransaction denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to updateTransaction denied.", 'info'
     return
 
   transactionId = unescape transactionId
   updates = this.request.body
+  that = this
 
   try
     yield transactions.Transaction.findByIdAndUpdate(transactionId, updates).exec()
-    this.body = "Transaction with ID: #{transactionId} successfully updated"
-    this.status = 'ok'
-    logger.info "User #{this.authenticated.email} updated transaction with id #{transactionId}"
+    that.body = "Transaction with ID: #{transactionId} successfully updated"
+    that.status = 200
+    logger.info "User #{that.authenticated.email} updated transaction with id #{transactionId}"
+
+    ###
+    # Update transaction metrics
+    ###
+    transactions.Transaction.findById transactionId, (err, doc) ->
+      if updates['$push']?.routes?
+        for k, route of updates['$push']
+          do (route) ->
+            if route.metrics?
+              for metric in route.metrics
+                if metric.type == 'counter'
+                  logger.info "incrementing mediator counter  #{metric.name}"
+                  sdc.increment "#{domain}.channels.#{doc.channelID}.#{route.name}.mediator_metrics.#{metric.name}"
+
+                if metric.type == 'timer'
+                  logger.info "incrementing mediator timer  #{metric.name}"
+                  sdc.timing "#{domain}.channels.#{doc.channelID}.#{route.name}.mediator_metrics.#{metric.name}", metric.value
+
+                if metric.type == 'gauge'
+                  logger.info "incrementing mediator gauge  #{metric.name}"
+                  sdc.gauge "#{domain}.channels.#{doc.channelID}.#{route.name}.mediator_metrics.#{metric.name}", metric.value
+
+            for orchestration in route.orchestrations
+              do (orchestration) ->
+                orchestrationDuration = orchestration.response.timestamp - orchestration.request.timestamp
+                orchestrationStatus = orchestration.response.status
+                orchestrationName = orchestration.name
+                if orchestration.group
+                  orchestrationName = "#{orchestration.group}.#{orchestration.name}" #Namespace it by group
+
+                ###
+                # Update timers
+                ###
+                logger.info 'updating async route timers'
+                sdc.timing "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}", orchestrationDuration
+                sdc.timing "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}.statusCodes.#{orchestrationStatus}" , orchestrationDuration
+
+                ###
+                # Update counters
+                ###
+                logger.info 'updating async route counters'
+                sdc.increment "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}"
+                sdc.increment "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}.statusCodes.#{orchestrationStatus}"
+
+                if orchestration.metrics?
+                  for metric in orchestration.metrics
+                    if metric.type == 'counter'
+                      logger.info "incrementing #{route.name} orchestration counter #{metric.name}"
+                      sdc.increment "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}.#{metric.name}", metric.value
+
+                    if metric.type == 'timer'
+                      logger.info  "incrementing #{route.name} orchestration timer #{metric.name}"
+                      sdc.timing "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}.#{metric.name}", metric.value
+
+                    if metric.type == 'gauge'
+                      logger.info  "incrementing #{route.name} orchestration gauge #{metric.name}"
+                      sdc.gauge "#{domain}.channels.#{doc.channelID}.#{route.name}.orchestrations.#{orchestrationName}.#{metric.name}", metric.value
+
   catch e
-    utils.logAndSetResponse this, 'internal server error', "Could not update transaction via the API: #{e}", 'error'
+    utils.logAndSetResponse this, 500, "Could not update transaction via the API: #{e}", 'error'
 
 
 ###
@@ -237,7 +374,7 @@ exports.removeTransaction = (transactionId) ->
 
   # Test if the user is authorised
   if not authorisation.inGroup 'admin', this.authenticated
-    utils.logAndSetResponse this, 'forbidden', "User #{this.authenticated.email} is not an admin, API access to removeTransaction denied.", 'info'
+    utils.logAndSetResponse this, 403, "User #{this.authenticated.email} is not an admin, API access to removeTransaction denied.", 'info'
     return
 
   # Get the values to use
@@ -246,7 +383,7 @@ exports.removeTransaction = (transactionId) ->
   try
     yield transactions.Transaction.findByIdAndRemove(transactionId).exec()
     this.body = 'Transaction successfully deleted'
-    this.status = 'ok'
+    this.status = 200
     logger.info "User #{this.authenticated.email} removed transaction with id #{transactionId}"
   catch e
-    utils.logAndSetResponse this, 'internal server error', "Could not remove transaction via the API: #{e}", 'error'
+    utils.logAndSetResponse this, 500, "Could not remove transaction via the API: #{e}", 'error'

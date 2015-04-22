@@ -6,13 +6,20 @@ net = require 'net'
 tls = require 'tls'
 Q = require 'q'
 config = require '../config/config'
-config.mongo = config.get('mongo')
-config.router = config.get('router')
+config.mongo = config.get 'mongo'
+config.router = config.get 'router'
 logger = require "winston"
-status = require "http-status"
 cookie = require 'cookie'
 fs = require 'fs'
-Keystore = require("../model/keystore").Keystore
+utils = require '../utils'
+
+statsdServer = config.get 'statsd'
+application = config.get 'application'
+SDC = require 'statsd-client'
+os = require 'os'
+
+domain = "#{os.hostname()}.#{application.name}.appMetrics"
+sdc = new SDC statsdServer
 
 containsMultiplePrimaries = (routes) ->
   numPrimaries = 0
@@ -21,6 +28,14 @@ containsMultiplePrimaries = (routes) ->
   return numPrimaries > 1
 
 setKoaResponse = (ctx, response) ->
+
+  # Try and parse the status to an int if it is a string
+  if typeof response.status is 'string'
+    try
+      response.status = parseInt response.status
+    catch err
+      logger.error err
+
   ctx.response.status = response.status
   ctx.response.timestamp = response.timestamp
   ctx.response.body = response.body
@@ -60,7 +75,7 @@ setCookiesOnContext = (ctx, value) ->
       ctx.cookies.set p_key,p_val,c_opts
 
 handleServerError = (ctx, err) ->
-  ctx.response.status = status.INTERNAL_SERVER_ERROR
+  ctx.response.status = 500
   ctx.response.timestamp = new Date()
   ctx.response.body = "An internal server error occurred"
   logger.error "Internal server error occured: #{err} "
@@ -73,7 +88,7 @@ sendRequestToRoutes = (ctx, routes, next) ->
   if containsMultiplePrimaries routes
     return next new Error "Cannot route transaction: Channel contains multiple primary routes and only one primary is allowed"
 
-  Keystore.findOne {}, (err, keystore) ->
+  utils.getKeystore (err, keystore) ->
 
     for route in routes
       path = getDestinationPath route, ctx.path
@@ -240,6 +255,8 @@ sendHttpRequest = (ctx, route, options) ->
           defered.resolve response
 
   routeReq.on "error", (err) -> defered.reject err
+  
+  routeReq.on "clientError", (err) -> defered.reject err
 
   routeReq.setTimeout config.router.timeout, -> defered.reject "Request Timed Out"
 
@@ -298,13 +315,15 @@ sendSocketRequest = (ctx, route, options) ->
 
   client.on 'error', (err) -> defered.reject err
 
+  client.on 'clientError', (err) -> defered.reject err
+
   client.on 'end', ->
     logger.info "Closed #{route.type} connection to #{options.host}:#{options.port}"
 
     if route.secured and not client.authorized
       return defered.reject new Error 'Client authorization failed'
     response.body = Buffer.concat bufs
-    response.status = status.OK
+    response.status = 200
     response.timestamp = new Date()
     if not defered.promise.isRejected()
       defered.resolve response
@@ -370,6 +389,8 @@ exports.route = (ctx, next) ->
 # Use with: app.use(router.koaMiddleware)
 ###
 exports.koaMiddleware = (next) ->
+  startTime = new Date() if statsdServer.enabled
   route = Q.denodeify exports.route
   yield route this
+  sdc.timing "#{domain}.routerMiddleware", startTime if statsdServer.enabled
   yield next

@@ -5,6 +5,7 @@ fs = require "fs"
 request = require "supertest"
 config = require "../../lib/config/config"
 config.authentication = config.get('authentication')
+config.tlsClientLookup = config.get('tlsClientLookup')
 Channel = require("../../lib/model/channels").Channel
 Client = require("../../lib/model/clients").Client
 Transaction = require("../../lib/model/transactions").Transaction
@@ -37,7 +38,7 @@ describe "e2e Integration Tests", ->
                 primary: true
               ]
         channel1.save (err) ->
-          testClientDoc =
+          testClientDoc1 =
             clientID: "testApp"
             clientDomain: "test-client.jembi.org"
             name: "TEST Client"
@@ -48,15 +49,32 @@ describe "e2e Integration Tests", ->
               ]
             passwordHash: ""
 
-          client = new Client testClientDoc
-          client.save (error, newAppDoc) ->
+          testClientDoc2 =
+            clientID: "testApp2"
+            clientDomain: "ca.openhim.org"
+            name: "TEST Client 2"
+            roles:
+              [
+                "OpenMRS_PoC"
+                "PoC"
+              ]
+            passwordHash: ""
+
+          client1 = new Client testClientDoc1
+          client2 = new Client testClientDoc2
+
+          Client.remove {}, -> client1.save -> client2.save ->
           	# remove default keystore
           	Keystore.remove {}, ->
               keystore = new Keystore
                 key: fs.readFileSync 'test/resources/server-tls/key.pem'
                 cert: 
                   data: fs.readFileSync 'test/resources/server-tls/cert.pem'
-                ca: [ { data: fs.readFileSync 'test/resources/client-tls/cert.pem' } ]
+                ca: [
+                  { data: fs.readFileSync 'test/resources/client-tls/cert.pem' },
+                  { data: fs.readFileSync 'test/resources/trust-tls/chain/intermediate.cert.pem' },
+                  { data: fs.readFileSync 'test/resources/trust-tls/chain/ca.cert.pem' }
+                ]
 
               keystore.save (err) ->
                 done err if err
@@ -67,15 +85,16 @@ describe "e2e Integration Tests", ->
       after (done) ->
         Channel.remove { name: "TEST DATA - Mock endpoint" }, ->
           Client.remove { clientID: "testApp" }, ->
-            mockServer.close ->
-              done()
+            Client.remove { clientID: "testApp2" }, ->
+              mockServer.close ->
+                done()
 
       afterEach (done) ->
         server.stop ->
           done()
 
       it "should forward a request to the configured routes if the client is authenticated and authorised", (done) ->
-        server.start 5001, 5000, null, null, null, null, ->
+        server.start httpPort: 5001, httpsPort: 5000, ->
           options =
             host: "localhost"
             path: "/test/mock"
@@ -85,19 +104,66 @@ describe "e2e Integration Tests", ->
             ca: [ fs.readFileSync "test/resources/server-tls/cert.pem" ]
 
           req = https.request options, (res) ->
-            res.on 'data', (chunk) -> 
-              res.statusCode.should.be.exactly 201
-              done()
+            res.statusCode.should.be.exactly 201
+            done()
           req.end()
 
       it "should reject a request when using an invalid cert", (done) ->
-        server.start 5001, 5000, null, null, null, null, ->
+        server.start httpPort: 5001, httpsPort: 5000, ->
           options =
             host: "localhost"
             path: "/test/mock"
             port: 5000
             cert: fs.readFileSync "test/resources/client-tls/invalid-cert.pem"
             key:  fs.readFileSync "test/resources/client-tls/invalid-key.pem"
+            ca: [ fs.readFileSync "test/resources/server-tls/cert.pem" ]
+
+          req = https.request options, (res) ->
+            res.statusCode.should.be.exactly 401
+            done()
+          req.end()
+
+      it "should authenticate a client further up the chain if 'in-chain' config is set", (done) ->
+        config.tlsClientLookup.type = "in-chain"
+        server.start httpPort: 5001, httpsPort: 5000, ->
+          options =
+            host: "localhost"
+            path: "/test/mock"
+            port: 5000
+            cert: fs.readFileSync "test/resources/trust-tls/chain/test.openhim.org.cert.pem"
+            key:  fs.readFileSync "test/resources/trust-tls/chain/test.openhim.org.key.pem"
+            ca: [ fs.readFileSync "test/resources/server-tls/cert.pem" ]
+
+          req = https.request options, (res) ->
+            res.statusCode.should.be.exactly 201
+            done()
+          req.end()
+
+      it "should reject a request with an invalid cert if 'in-chain' config is set", (done) ->
+        config.tlsClientLookup.type = "in-chain"
+        server.start httpPort: 5001, httpsPort: 5000, ->
+          options =
+            host: "localhost"
+            path: "/test/mock"
+            port: 5000
+            cert: fs.readFileSync "test/resources/client-tls/invalid-cert.pem"
+            key:  fs.readFileSync "test/resources/client-tls/invalid-key.pem"
+            ca: [ fs.readFileSync "test/resources/server-tls/cert.pem" ]
+
+          req = https.request options, (res) ->
+            res.statusCode.should.be.exactly 401
+            done()
+          req.end()
+
+      it "should NOT authenticate a client further up the chain if 'strict' config is set", (done) ->
+        config.tlsClientLookup.type = "strict"
+        server.start httpPort: 5001, httpsPort: 5000, ->
+          options =
+            host: "localhost"
+            path: "/test/mock"
+            port: 5000
+            cert: fs.readFileSync "test/resources/trust-tls/chain/test.openhim.org.cert.pem"
+            key:  fs.readFileSync "test/resources/trust-tls/chain/test.openhim.org.key.pem"
             ca: [ fs.readFileSync "test/resources/server-tls/cert.pem" ]
 
           req = https.request options, (res) ->
@@ -155,7 +221,7 @@ describe "e2e Integration Tests", ->
 
       describe "with no credentials", ->
         it "should `throw` 401", (done) ->
-          server.start 5001, null, null, null, null, null, ->
+          server.start httpPort: 5001, ->
             request("http://localhost:5001")
               .get("/test/mock")
               .expect(401)
@@ -167,7 +233,7 @@ describe "e2e Integration Tests", ->
 
       describe "with incorrect credentials", ->
         it "should `throw` 401", (done) ->
-          server.start 5001, null, null, null, null, null, ->
+          server.start httpPort: 5001, ->
             request("http://localhost:5001")
               .get("/test/mock")
               .auth("incorrect_user", "incorrect_password")
@@ -181,7 +247,7 @@ describe "e2e Integration Tests", ->
 
       describe "with correct credentials", ->
         it "should return 200 OK", (done) ->
-          server.start 5001, null, null, null, null, null, ->
+          server.start httpPort: 5001, ->
             request("http://localhost:5001")
               .get("/test/mock")
               .auth("testApp", "password")
@@ -292,7 +358,7 @@ describe "e2e Integration Tests", ->
         done()
 
     it "should return 201 CREATED on POST", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .post("/test/mock")
           .send(testDoc)
@@ -305,7 +371,7 @@ describe "e2e Integration Tests", ->
               done()
 
     it "should return 201 CREATED on POST - Public Channel", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
         .post("/public")
         .send(testDoc)
@@ -317,7 +383,7 @@ describe "e2e Integration Tests", ->
             done()
 
     it "should return 201 CREATED on POST - Public Channel with whitelisted ip", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
         .post("/private")
         .send(testDoc)
@@ -329,7 +395,7 @@ describe "e2e Integration Tests", ->
             done()
 
     it "should return 201 CREATED on PUT", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .put("/test/mock")
           .send(testDoc)
@@ -342,7 +408,7 @@ describe "e2e Integration Tests", ->
               done()
 
     it "should decompress gzip", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
         .put("/gmo")
         .set('Accept-Encoding', '') #Unset encoding, because supertest defaults to gzip,deflate
@@ -352,7 +418,7 @@ describe "e2e Integration Tests", ->
         .expect(testDoc, done)
 
     it "should returned gzipped response", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
         .put("/gmo")
         .set('Accept-Encoding', 'gzip')
@@ -420,7 +486,7 @@ describe "e2e Integration Tests", ->
         done()
 
     it "should keep HTTP headers of the response intact", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .get("/test/mock")
           .send(testDoc)
@@ -499,7 +565,7 @@ describe "e2e Integration Tests", ->
         done()
 
     it "should return 201 CREATED on POST", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .post("/test/mock")
           .set("Content-Type", "text/xml")
@@ -513,7 +579,7 @@ describe "e2e Integration Tests", ->
               done()
 
     it "should return 201 CREATED on PUT", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .put("/test/mock")
           .set("Content-Type", "text/xml")
@@ -588,7 +654,7 @@ describe "e2e Integration Tests", ->
         done()
 
     it "should return 201 CREATED on POST", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .post("/test/mock")
           .set("Content-Type", "application/json")
@@ -602,7 +668,7 @@ describe "e2e Integration Tests", ->
               done()
 
     it "should return 201 CREATED on PUT", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .put("/test/mock")
           .set("Content-Type", "application/json")
@@ -669,7 +735,7 @@ describe "e2e Integration Tests", ->
         done()
 
     it "should return 201 CREATED on POST", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .post("/test/mock")
           .send(testRegExDoc)
@@ -682,7 +748,7 @@ describe "e2e Integration Tests", ->
               done()
 
     it "should return 201 CREATED on PUT", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         request("http://localhost:5001")
           .put("/test/mock")
           .send(testRegExDoc)
@@ -700,7 +766,7 @@ describe "e2e Integration Tests", ->
     mediatorResponse =
       status: "Successful"
       response:
-        status: "200"
+        status: 200
         headers: {}
         body: "<transaction response>"
         timestamp: 1412257881909
@@ -714,7 +780,7 @@ describe "e2e Integration Tests", ->
           method: "POST"
           timestamp: 1412257881904
         response:
-          status: "200"
+          status: 200
           headers: {}
           body: "<route response>"
           timestamp: 1412257881909
@@ -770,7 +836,7 @@ describe "e2e Integration Tests", ->
 
     describe "mediator response processing", ->
       it "should return the specified mediator response element as the actual response", (done) ->
-        server.start 5001, null, null, null, null, null, ->
+        server.start httpPort: 5001, ->
           request("http://localhost:5001")
             .get("/test/mediator")
             .auth("mediatorTestApp", "password")
@@ -778,7 +844,7 @@ describe "e2e Integration Tests", ->
             .expect(mediatorResponse.response.body, done)
 
       it "should setup the correct metadata on the transaction as specified by the mediator response", (done) ->
-        server.start 5001, null, null, null, null, null, ->
+        server.start httpPort: 5001, ->
           request("http://localhost:5001")
             .get("/test/mediator")
             .auth("mediatorTestApp", "password")
@@ -805,7 +871,7 @@ describe "e2e Integration Tests", ->
       mediatorResponse =
         status: "Successful"
         response:
-          status: "200"
+          status: 200
           headers: {}
           body: "<transaction response>"
           timestamp: 1412257881909
@@ -819,7 +885,7 @@ describe "e2e Integration Tests", ->
             method: "POST"
             timestamp: 1412257881904
           response:
-            status: "200"
+            status: 200
             headers: {}
             body: "<route response>"
             timestamp: 1412257881909
@@ -867,7 +933,7 @@ describe "e2e Integration Tests", ->
 
 
     it "should return 201 CREATED on POST", (done) ->
-      server.start 5001, null, null, null, null, null, ->
+      server.start httpPort: 5001, ->
         form = new FormData()
         form.append('my_field', 'my value')
         form.append('unix', fs.readFileSync "test/resources/files/unix.txt")

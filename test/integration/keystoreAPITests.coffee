@@ -4,7 +4,6 @@ testUtils = require "../testUtils"
 auth = require("../testUtils").auth
 server = require "../../lib/server"
 Keystore = require('../../lib/model/keystore').Keystore
-Certificate = require('../../lib/model/keystore').Certificate
 sinon = require "sinon"
 fs = require 'fs'
 path = require 'path'
@@ -17,7 +16,7 @@ describe 'API Integration Tests', ->
 
     before (done) ->
       auth.setupTestUsers (err) ->
-        server.start null, null, 8080, null, null, false, ->
+        server.start apiPort: 8080, ->
           done()
 
     after (done) ->
@@ -206,7 +205,7 @@ describe 'API Integration Tests', ->
                 keystore.key.should.be.exactly postData.key
                 done()
 
-    it "Should not alllow a non-admin user to add a new server key", (done) ->
+    it "Should not allow a non-admin user to add a new server key", (done) ->
       testUtils.setupTestKeystore (keystore) ->
         postData = { key: fs.readFileSync('test/resources/server-tls/key.pem').toString() }
         request("https://localhost:8080")
@@ -402,3 +401,24 @@ describe 'API Integration Tests', ->
                 done err
               else
                 done()
+
+    it "Should find the compare the modulus of a certificate it corresponding protected key", (done) ->
+      testUtils.setupTestKeystore (keystore) ->
+        keystore.key = fs.readFileSync 'test/resources/protected/test.key'
+        keystore.cert.data = fs.readFileSync 'test/resources/protected/test.crt'
+        keystore.passphrase = 'password'
+        keystore.save ->
+          request("https://localhost:8080")
+          .get("/keystore/validity")
+          .set("auth-username", testUtils.rootUser.email)
+          .set("auth-ts", authDetails.authTS)
+          .set("auth-salt", authDetails.authSalt)
+          .set("auth-token", authDetails.authToken)
+          .expect(200)
+          .end (err, res) ->
+            if err
+              done err
+            else
+              res.body.valid.should.be.exactly true
+              done()
+
