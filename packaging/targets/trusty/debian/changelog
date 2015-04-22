@@ -1,3 +1,49 @@
+openhim-core-js (1.1.1-4~trusty) trusty; urgency=medium
+
+  * Release Version 1.1.1-4
+    -e0d1149 Merge remote-tracking branch 'origin/master' into debian-p
+    --https://github.com/jembi/openhim-core-js/commmit/e0d1149
+    -50f9189 Merge pull request #481 from jembi/parse_response_status
+    --https://github.com/jembi/openhim-core-js/commmit/50f9189
+    -870c189 Parse response status to an int if it is a string
+    --https://github.com/jembi/openhim-core-js/commmit/870c189
+    -9e90aa4 Merge pull request #475 from jembi/cert_passphrase
+    --https://github.com/jembi/openhim-core-js/commmit/9e90aa4
+    -4426253 added test to ensure a server can start with a protected k
+    --https://github.com/jembi/openhim-core-js/commmit/4426253
+    -5e87a6d Merge pull request #480 from jembi/fix-memory-leak
+    --https://github.com/jembi/openhim-core-js/commmit/5e87a6d
+    -d869705 Reference TLSSocket instead of underlying Socket
+    --https://github.com/jembi/openhim-core-js/commmit/d869705
+    -df13bf0 Merge branch 'master' of github.com:jembi/openhim-core-js
+    --https://github.com/jembi/openhim-core-js/commmit/df13bf0
+    -eb512af Merge pull request #476 from jembi/ssl-exception-handling
+    --https://github.com/jembi/openhim-core-js/commmit/eb512af
+    -42695d0 added tests to test protected key and cert combinations
+    --https://github.com/jembi/openhim-core-js/commmit/42695d0
+    -8c42140 OHM-134: Updated logger.info->logger.error - Added router
+    --https://github.com/jembi/openhim-core-js/commmit/8c42140
+    -d12977c Added better explanation of replica set use.
+    --https://github.com/jembi/openhim-core-js/commmit/d12977c
+    -ec4ef6d fixed tests
+    --https://github.com/jembi/openhim-core-js/commmit/ec4ef6d
+    -dd438f4 changed the method name
+    --https://github.com/jembi/openhim-core-js/commmit/dd438f4
+    -c278e43 OHM-134: Added error checking for server and client
+    --https://github.com/jembi/openhim-core-js/commmit/c278e43
+    -a35306a initial cert_passphrase
+    --https://github.com/jembi/openhim-core-js/commmit/a35306a
+    -53ffe50 added passphrase
+    --https://github.com/jembi/openhim-core-js/commmit/53ffe50
+    -0dff0b7 Merge pull request #470 from jembi/mongoose-4.0
+    --https://github.com/jembi/openhim-core-js/commmit/0dff0b7
+    -b37dab3 Removed competing save of task.transactions.
+    --https://github.com/jembi/openhim-core-js/commmit/b37dab3
+    -0cf6819 Make sure updated transactions get saved.... again.
+    --https://github.com/jembi/openhim-core-js/commmit/0cf6819
+
+ -- Carl Leitner <litlfred@ibiblio.org>  Wed, 22 Apr 2015 14:15:18 +0000
+
 openhim-core-js (1.1.1-3~trusty) trusty; urgency=medium
 
   * Release Version 1.1.1-3
