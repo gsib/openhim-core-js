@@ -70,11 +70,14 @@ exports.setServerCert = ->
     cert = this.request.body.cert
     passphrase = this.request.body.passphrase
     readCertificateInfo = Q.denodeify pem.readCertificateInfo
+    getFingerprint = Q.denodeify pem.getFingerprint
     try
       certInfo = yield readCertificateInfo cert
+      fingerprint = yield getFingerprint cert
     catch err
       return utils.logAndSetResponse this, 400, "Could not add server cert via the API: #{err}", 'error'
     certInfo.data = cert
+    certInfo.fingerprint = fingerprint.fingerprint
 
     keystoreDoc = yield Keystore.findOne().exec()
     keystoreDoc.cert = certInfo
@@ -126,6 +129,7 @@ exports.addTrustedCert = ->
 
     keystoreDoc = yield Keystore.findOne().exec()
     readCertificateInfo = Q.denodeify pem.readCertificateInfo
+    getFingerprint = Q.denodeify pem.getFingerprint
 
     if certs.length < 1
       invalidCert = true
@@ -133,10 +137,12 @@ exports.addTrustedCert = ->
     for cert in certs
       try
         certInfo = yield readCertificateInfo cert
+        fingerprint = yield getFingerprint cert
       catch err
         invalidCert = true
         continue
       certInfo.data = cert
+      certInfo.fingerprint = fingerprint.fingerprint
       keystoreDoc.ca.push certInfo
 
     yield Q.ninvoke keystoreDoc, 'save'
@@ -187,6 +193,10 @@ exports.getCertKeyStatus = getCertKeyStatus = (callback) ->
 
   Keystore.findOne (err, keystoreDoc) ->
     return callback err, null if err
+    
+    # if the key is encrypted but no passphrase is supplied, return  false instantly
+    if /Proc-Type:.*ENCRYPTED/.test(keystoreDoc.key) and (not keystoreDoc.passphrase? or keystoreDoc.passphrase.length == 0)
+      return callback null, false
 
     pem.getModulusFromProtected keystoreDoc.key, keystoreDoc.passphrase, (err, keyModulus) ->
       return callback err, null if err
